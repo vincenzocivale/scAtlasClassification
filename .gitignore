@@ -2,4 +2,3 @@ dataset/
 nohup.out
 *.ckpt
 *.h5ad
-scFoundation/
