@@ -1,0 +1,1 @@
+nohup python3 get_embedding.py --input_type singlecell --output_type cell --data_path ./your_data.h5ad --save_path /equilibrium/datasets/TCGA-histological-data/scDataset/embeddings --model_path /equilibrium/datasets/TCGA-histological-data/scDataset/scFoundation/models.ckpt --ckpt_name 01B-resolution --tgthighres t4 --pre_normalized F --min_genes_cell 200 > infer.log 2>&1 &
