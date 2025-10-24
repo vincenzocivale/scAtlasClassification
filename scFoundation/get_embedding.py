@@ -11,6 +11,8 @@ import scipy.sparse
 from scipy.sparse import issparse
 import scanpy as sc
 from load import *
+import time
+
 
 
 ####################################Settings#################################
@@ -60,6 +62,7 @@ def main_gene_selection(X_df, gene_list):
     var = pd.DataFrame(index=X_df.columns)
     var['mask'] = [1 if i in to_fill_columns else 0 for i in list(var.index)]
     return X_df, to_fill_columns,var
+
 gene_list_df = pd.read_csv('./OS_scRNA_gene_index.19264.tsv', header=0, delimiter='\t')
 gene_list = list(gene_list_df['gene_name'])
 
@@ -80,7 +83,7 @@ def main():
         gexpr_feature = scipy.sparse.load_npz(args.data_path)
         gexpr_feature = pd.DataFrame(gexpr_feature.toarray())
     elif args.data_path[-4:]=='h5ad':
-        # --- MODIFICATO ---
+        
         # Carica i dati e applica immediatamente il filtraggio
         adata = sc.read_h5ad(args.data_path)
         
@@ -101,7 +104,7 @@ def main():
         else:
             gexpr_feature = adata.X
         gexpr_feature = pd.DataFrame(gexpr_feature,index=idx,columns=col)
-        # --- FINE MODIFICATO ---
+       
     elif args.data_path[-3:]=='npy':
         gexpr_feature = np.load(args.data_path)
         gexpr_feature = pd.DataFrame(gexpr_feature)
@@ -128,7 +131,7 @@ def main():
         ckpt_path = args.model_path
         key=None
     else:
-        ckpt_path = './models/models.ckpt'
+        ckpt_path = args.model_path
         if args.output_type == 'cell':
             if args.version == 'ce':
                 key = 'cell'
@@ -144,6 +147,7 @@ def main():
             key = 'gene'
         else:
             raise ValueError('output_mode must be one of cell gene, gene_batch, gene_expression')
+    print('Load model from {}'.format(ckpt_path))
     pretrainmodel,pretrainconfig = load_model_frommmf(ckpt_path,key)
     pretrainmodel.eval()
 
@@ -151,9 +155,13 @@ def main():
     batchcontainer = []
     strname = os.path.join(args.save_path, args.task_name +'_'+ args.ckpt_name +"_"+ args.input_type + '_' + args.output_type + '_embedding_' + args.tgthighres + '_resolution.npy')
     print('save at {}'.format(strname))
+
+    total_inference_time = 0.0
     
     #Inference
     for i in tqdm(range(gexpr_feature.shape[0])):
+        start_time = time.time()
+
         with torch.no_grad():
             #Bulk
             if args.input_type == 'bulk':
@@ -282,9 +290,17 @@ def main():
                 geneexpemb.append(out.detach().cpu().numpy())                
             else:
                 raise ValueError('output_type must be cell or gene or gene_batch or gene_expression')
+            
+        end_time = time.time()
+        total_inference_time += (end_time - start_time)
+        
     geneexpemb = np.squeeze(np.array(geneexpemb))
     print(geneexpemb.shape)
     np.save(strname,geneexpemb)
+
+    avg_time = total_inference_time / gexpr_feature.shape[0]
+    print(f"\nTempo medio di inferenza per cellula: {avg_time:.4f} secondi")
+    print(f"Tempo totale di inferenza: {total_inference_time:.2f} secondi")
     
 
 if __name__=='__main__':

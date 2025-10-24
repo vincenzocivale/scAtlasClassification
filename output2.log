@@ -1,14 +1,0 @@
-nohup: ignoring input
-/home/vcivale/.local/lib/python3.10/site-packages/anndata/_core/anndata.py:835: UserWarning: 
-AnnData expects .var.index to contain strings, but got values like:
-    ['MIR1302-2HG', 'FAM138A', 'OR4F5', 'ENSG00000238009', 'ENSG00000239945']
-
-    Inferred to be: categorical
-
-  names = self._prep_dim_index(names, "var")
-Starting alignment of eye dataset to provided gene list...
-Starting alignment of eye dataset to provided gene list...
-/home/vcivale/.local/lib/python3.10/site-packages/anndata/_core/storage.py:48: FutureWarning: AnnData previously had undefined behavior around matrices of type <class 'scipy.sparse._lil.lil_matrix'>.In 0.12, passing in this type will throw an error. Please convert to a supported type.Continue using for this minor version at your own risk.
-  warnings.warn(msg, FutureWarning)
-Number of common genes found: 19041
-Processing blocks:   0%|          | 0/20 [00:00<?, ?it/s]

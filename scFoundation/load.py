@@ -99,7 +99,7 @@ def convertconfig(ckpt):
     return newconfig
 
 def load_model(best_ckpt_path, device):
-    model_data = torch.load(best_ckpt_path,map_location=device)
+    model_data = torch.load(best_ckpt_path, map_location=device, weights_only=False)
     if not model_data.__contains__('config'):
         print('***** No config *****')
         config={}
@@ -122,7 +122,7 @@ def load_model(best_ckpt_path, device):
     return model.cuda(),config
 
 def load_model_frommmf(best_ckpt_path, key='gene'):
-    model_data = torch.load(best_ckpt_path,map_location='cpu')
+    model_data = torch.load(best_ckpt_path,map_location='cpu', weights_only=False)
     model_data = model_data[key]
     model_data = convertconfig(model_data)
     if not model_data.__contains__('config'):
