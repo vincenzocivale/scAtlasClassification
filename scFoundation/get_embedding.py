@@ -67,241 +67,167 @@ gene_list_df = pd.read_csv('./OS_scRNA_gene_index.19264.tsv', header=0, delimite
 gene_list = list(gene_list_df['gene_name'])
 
 def main():
-    #Set random seed
+    # Set random seed
     random.seed(0)
-    np.random.seed(0)  # numpy random generator
-
+    np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.manual_seed_all(0)
-
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    #Load data
-    if args.data_path[-3:]=='npz':
-        gexpr_feature = scipy.sparse.load_npz(args.data_path)
-        gexpr_feature = pd.DataFrame(gexpr_feature.toarray())
-    elif args.data_path[-4:]=='h5ad':
-        
-        # Carica i dati e applica immediatamente il filtraggio
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+
+    # --- CARICAMENTO DATI ---
+    if args.data_path.endswith('npz'):
+        gexpr_feature = scipy.sparse.load_npz(args.data_path).toarray()
+        gexpr_feature = pd.DataFrame(gexpr_feature)
+    elif args.data_path.endswith('h5ad'):
         adata = sc.read_h5ad(args.data_path)
-        
-        # Applica il filtraggio se specificato
         if args.min_genes_cell > 0:
             print(f"Original number of cells: {adata.n_obs}")
             sc.pp.filter_cells(adata, min_genes=args.min_genes_cell)
             print(f"Number of cells after filtering ({args.min_genes_cell} min genes): {adata.n_obs}")
-        
-        # Prosegui con la logica esistente usando l'oggetto 'adata' filtrato
         idx = adata.obs_names.tolist()
         try:
             col = adata.var.gene_name.tolist()
         except:
             col = adata.var_names.tolist()
-        if issparse(adata.X):
-            gexpr_feature = adata.X.toarray()
-        else:
-            gexpr_feature = adata.X
-        gexpr_feature = pd.DataFrame(gexpr_feature,index=idx,columns=col)
-       
-    elif args.data_path[-3:]=='npy':
-        gexpr_feature = np.load(args.data_path)
-        gexpr_feature = pd.DataFrame(gexpr_feature)
+        gexpr_feature = adata.X.toarray() if issparse(adata.X) else adata.X
+        gexpr_feature = pd.DataFrame(gexpr_feature, index=idx, columns=col)
+    elif args.data_path.endswith('npy'):
+        gexpr_feature = pd.DataFrame(np.load(args.data_path))
     else:
-        gexpr_feature=pd.read_csv(args.data_path,index_col=0)
+        gexpr_feature = pd.read_csv(args.data_path, index_col=0)
     
-    if gexpr_feature.shape[1]<19264:
-        print('covert gene feature into 19264')
-        gexpr_feature, to_fill_columns,var = main_gene_selection(gexpr_feature,gene_list)
-        assert gexpr_feature.shape[1]>=19264
-    
+    if gexpr_feature.shape[1] < 19264:
+        print('Convert gene feature into 19264...')
+        gexpr_feature, to_fill_columns, var = main_gene_selection(gexpr_feature, gene_list)
+
     if (args.pre_normalized == 'F') and (args.input_type == 'bulk'):
         adata = sc.AnnData(gexpr_feature)
         sc.pp.normalize_total(adata)
         sc.pp.log1p(adata)
-        gexpr_feature = pd.DataFrame(adata.X,index=adata.obs_names,columns=adata.var_names)
+        gexpr_feature = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names)
 
     if args.demo:
-        gexpr_feature = gexpr_feature.iloc[:10,:]
-    print(gexpr_feature.shape)
+        gexpr_feature = gexpr_feature.iloc[:10, :]
 
-    #Load model
+    print(f"Dataset shape: {gexpr_feature.shape}")
+
+    # --- MODELLO ---
     if args.version == 'noversion':
         ckpt_path = args.model_path
-        key=None
+        key = None
     else:
         ckpt_path = args.model_path
         if args.output_type == 'cell':
-            if args.version == 'ce':
-                key = 'cell'
-            elif args.version == 'rde':
-                key = 'rde'
-            else:
-                raise ValueError('No version found')
-        elif args.output_type == 'gene':
-            key = 'gene'
-        elif args.output_type == 'gene_batch':
-            key = 'gene'
-        elif args.output_type == 'gene_expression': # Not recommended
-            key = 'gene'
+            key = 'cell' if args.version == 'ce' else 'rde'
         else:
-            raise ValueError('output_mode must be one of cell gene, gene_batch, gene_expression')
-    print('Load model from {}'.format(ckpt_path))
-    pretrainmodel,pretrainconfig = load_model_frommmf(ckpt_path,key)
+            key = 'gene'
+
+    print(f"Load model from {ckpt_path}")
+    pretrainmodel, pretrainconfig = load_model_frommmf(ckpt_path, key)
     pretrainmodel.eval()
 
-    geneexpemb=[]
-    batchcontainer = []
-    strname = os.path.join(args.save_path, args.task_name +'_'+ args.ckpt_name +"_"+ args.input_type + '_' + args.output_type + '_embedding_' + args.tgthighres + '_resolution.npy')
-    print('save at {}'.format(strname))
+    # --- PARAMETRI SALVATAGGIO ---
+    SAVE_EVERY = 1000  # salva ogni N campioni
+    strname = os.path.join(args.save_path, f"{args.task_name}_{args.ckpt_name}_{args.input_type}_{args.output_type}_embedding_{args.tgthighres}_resolution.npy")
+    temp_save = strname.replace('.npy', '_partial.npy')
+    progress_file = strname.replace('.npy', '_progress.txt')
+    print(f"Salverò progressivamente ogni {SAVE_EVERY} campioni in: {temp_save}")
+
+    # --- RIPRESA AUTOMATICA ---
+    start_index = 0
+    geneexpemb = []
+
+    if os.path.exists(temp_save) and os.path.exists(progress_file):
+        print("🔁 Rilevato checkpoint parziale. Ripristino in corso...")
+        geneexpemb = list(np.load(temp_save, allow_pickle=True))
+        with open(progress_file, 'r') as f:
+            start_index = int(f.read().strip())
+        print(f"→ Riprendo da campione {start_index}.")
 
     total_inference_time = 0.0
-    
-    #Inference
-    for i in tqdm(range(gexpr_feature.shape[0])):
+
+    # --- INFERENZA ---
+    for i in tqdm(range(start_index, gexpr_feature.shape[0])):
         start_time = time.time()
-
         with torch.no_grad():
-            #Bulk
-            if args.input_type == 'bulk':
-                if args.pre_normalized == 'T':
-                    totalcount = gexpr_feature.iloc[i,:].sum()
-                elif args.pre_normalized == 'F':
-                    totalcount = np.log10(gexpr_feature.iloc[i,:].sum())
-                else:
-                    raise ValueError('pre_normalized must be T or F')
-                tmpdata = (gexpr_feature.iloc[i,:]).tolist()
-                pretrain_gene_x = torch.tensor(tmpdata+[totalcount,totalcount]).unsqueeze(0).cuda()
-                data_gene_ids = torch.arange(19266, device=pretrain_gene_x.device).repeat(pretrain_gene_x.shape[0], 1)
-            
-            #Single cell
-            elif args.input_type == 'singlecell':
-                # pre-Normalization
+            # --- BLOCCO DATI ---
+            if args.input_type == 'singlecell':
                 if args.pre_normalized == 'F':
-                    # --- MODIFICATO ---
-                    # Aggiunto un controllo per le cellule con somma zero che potrebbero essere sfuggite
-                    current_sum = gexpr_feature.iloc[i,:].sum()
-                    if current_sum == 0:
-                        # Se la somma è zero, la normalizzazione darebbe errore. Creiamo un vettore di zeri.
-                        tmpdata = (np.zeros_like(gexpr_feature.iloc[i,:])).tolist()
-                    else:
-                        tmpdata = (np.log1p(gexpr_feature.iloc[i,:] / current_sum * 1e4)).tolist()
-                    # --- FINE MODIFICATO ---
+                    current_sum = gexpr_feature.iloc[i, :].sum()
+                    tmpdata = np.zeros_like(gexpr_feature.iloc[i, :]) if current_sum == 0 else np.log1p(gexpr_feature.iloc[i, :] / current_sum * 1e4)
                 elif args.pre_normalized == 'T':
-                    tmpdata = (gexpr_feature.iloc[i,:]).tolist()
+                    tmpdata = gexpr_feature.iloc[i, :]
                 elif args.pre_normalized == 'A':
-                    tmpdata = (gexpr_feature.iloc[i,:-1]).tolist()
+                    tmpdata = gexpr_feature.iloc[i, :-1]
                 else:
-                    raise ValueError('pre_normalized must be T,F or A')
+                    raise ValueError('pre_normalized must be T, F or A')
 
-                if args.pre_normalized == 'A':
-                    totalcount = gexpr_feature.iloc[i,-1]
-                else:
-                    totalcount = gexpr_feature.iloc[i,:].sum()
-                
-                # --- MODIFICATO ---
-                # Aggiunto un piccolo valore (epsilon) per evitare log10(0)
+                totalcount = gexpr_feature.iloc[i, -1] if args.pre_normalized == 'A' else gexpr_feature.iloc[i, :].sum()
                 log_totalcount = np.log10(totalcount + 1e-10)
-                # --- FINE MODIFICATO ---
 
-                # select resolution
                 if args.tgthighres[0] == 'f':
-                    pretrain_gene_x = torch.tensor(tmpdata+[np.log10(totalcount*float(args.tgthighres[1:])+1e-10),log_totalcount]).unsqueeze(0).cuda()
+                    pretrain_gene_x = torch.tensor(list(tmpdata) + [np.log10(totalcount * float(args.tgthighres[1:]) + 1e-10), log_totalcount]).unsqueeze(0).to(device)
                 elif args.tgthighres[0] == 'a':
-                    pretrain_gene_x = torch.tensor(tmpdata+[log_totalcount+float(args.tgthighres[1:]),log_totalcount]).unsqueeze(0).cuda()
+                    pretrain_gene_x = torch.tensor(list(tmpdata) + [log_totalcount + float(args.tgthighres[1:]), log_totalcount]).unsqueeze(0).to(device)
                 elif args.tgthighres[0] == 't':
-                    pretrain_gene_x = torch.tensor(tmpdata+[float(args.tgthighres[1:]),log_totalcount]).unsqueeze(0).cuda()
+                    pretrain_gene_x = torch.tensor(list(tmpdata) + [float(args.tgthighres[1:]), log_totalcount]).unsqueeze(0).to(device)
                 else:
-                    raise ValueError('tgthighres must be start with f, a or t')
-                data_gene_ids = torch.arange(19266, device=pretrain_gene_x.device).repeat(pretrain_gene_x.shape[0], 1)
+                    raise ValueError('tgthighres must start with f, a or t')
 
+                data_gene_ids = torch.arange(19266, device=device).repeat(1, 1)
+            else:
+                raise ValueError('Questo script è pensato per input_type=singlecell')
+
+            # --- EMBEDDING ---
             value_labels = pretrain_gene_x > 0
             x, x_padding = gatherData(pretrain_gene_x, value_labels, pretrainconfig['pad_token_id'])
-
-            #Cell embedding
-            if args.output_type=='cell':
+            if args.output_type == 'cell':
                 position_gene_ids, _ = gatherData(data_gene_ids, value_labels, pretrainconfig['pad_token_id'])
-                x = pretrainmodel.token_emb(torch.unsqueeze(x, 2).float(), output_weight = 0)
+                x = pretrainmodel.token_emb(torch.unsqueeze(x, 2).float(), output_weight=0)
                 position_emb = pretrainmodel.pos_emb(position_gene_ids)
                 x += position_emb
-                geneemb = pretrainmodel.encoder(x,x_padding)
+                geneemb = pretrainmodel.encoder(x, x_padding)
 
-                geneemb1 = geneemb[:,-1,:]
-                geneemb2 = geneemb[:,-2,:]
-                geneemb3, _ = torch.max(geneemb[:,:-2,:], dim=1)
-                geneemb4 = torch.mean(geneemb[:,:-2,:], dim=1)
-                if args.pool_type=='all':
-                    geneembmerge = torch.concat([geneemb1,geneemb2,geneemb3,geneemb4],axis=1)
-                elif args.pool_type=='max':
+                geneemb1 = geneemb[:, -1, :]
+                geneemb2 = geneemb[:, -2, :]
+                geneemb3, _ = torch.max(geneemb[:, :-2, :], dim=1)
+                geneemb4 = torch.mean(geneemb[:, :-2, :], dim=1)
+                if args.pool_type == 'all':
+                    geneembmerge = torch.concat([geneemb1, geneemb2, geneemb3, geneemb4], axis=1)
+                elif args.pool_type == 'max':
                     geneembmerge, _ = torch.max(geneemb, dim=1)
                 else:
                     raise ValueError('pool_type must be all or max')
                 geneexpemb.append(geneembmerge.detach().cpu().numpy())
 
-            #Gene embedding
-            elif args.output_type=='gene':
-                pretrainmodel.to_final = None
-                encoder_data, encoder_position_gene_ids, encoder_data_padding, encoder_labels, decoder_data, decoder_data_padding, new_data_raw, data_mask_labels, decoder_position_gene_ids = getEncoerDecoderData(pretrain_gene_x.float(),pretrain_gene_x.float(),pretrainconfig)
-                out = pretrainmodel.forward(x=encoder_data, padding_label=encoder_data_padding,
-                                            encoder_position_gene_ids=encoder_position_gene_ids,
-                                            encoder_labels=encoder_labels,
-                                            decoder_data=decoder_data,
-                                            mask_gene_name=False,
-                                            mask_labels=None,
-                                            decoder_position_gene_ids=decoder_position_gene_ids,
-                                            decoder_data_padding_labels=decoder_data_padding,
-                                            )
-                out = out[:,:19264,:].contiguous()
-                geneexpemb.append(out.detach().cpu().numpy())
-
-            #Gene batch embedding
-            elif args.output_type=='gene_batch':
-                batchcontainer.append(pretrain_gene_x.float())
-                if len(batchcontainer)==gexpr_feature.shape[0]:
-                    batchcontainer = torch.concat(batchcontainer,axis=0)
-                else:
-                    continue
-                pretrainmodel.to_final = None
-                encoder_data, encoder_position_gene_ids, encoder_data_padding, encoder_labels, decoder_data, decoder_data_padding, new_data_raw, data_mask_labels, decoder_position_gene_ids = getEncoerDecoderData(batchcontainer,batchcontainer,pretrainconfig)
-                out = pretrainmodel.forward(x=encoder_data, padding_label=encoder_data_padding,
-                                            encoder_position_gene_ids=encoder_position_gene_ids,
-                                            encoder_labels=encoder_labels,
-                                            decoder_data=decoder_data,
-                                            mask_gene_name=False,
-                                            mask_labels=None,
-                                            decoder_position_gene_ids=decoder_position_gene_ids,
-                                            decoder_data_padding_labels=decoder_data_padding,
-                                            )
-                geneexpemb = out[:,:19264,:].contiguous().detach().cpu().numpy()
-            #Gene_expression
-            elif args.output_type=='gene_expression':
-                encoder_data, encoder_position_gene_ids, encoder_data_padding, encoder_labels, decoder_data, decoder_data_padding, new_data_raw, data_mask_labels, decoder_position_gene_ids = getEncoerDecoderData(pretrain_gene_x.float(),pretrain_gene_x.float(),pretrainconfig)
-                out = pretrainmodel.forward(x=encoder_data, padding_label=encoder_data_padding,
-                                            encoder_position_gene_ids=encoder_position_gene_ids,
-                                            encoder_labels=encoder_labels,
-                                            decoder_data=decoder_data,
-                                            mask_gene_name=False,
-                                            mask_labels=None,
-                                            decoder_position_gene_ids=decoder_position_gene_ids,
-                                            decoder_data_padding_labels=decoder_data_padding,
-                                            )
-                out = out[:,:19264].contiguous()
-                geneexpemb.append(out.detach().cpu().numpy())                
-            else:
-                raise ValueError('output_type must be cell or gene or gene_batch or gene_expression')
-            
         end_time = time.time()
         total_inference_time += (end_time - start_time)
-        
+
+        # --- SALVATAGGIO PROGRESSIVO ---
+        if (i + 1) % SAVE_EVERY == 0 or (i + 1) == gexpr_feature.shape[0]:
+            np.save(temp_save, np.array(geneexpemb, dtype=object))
+            with open(progress_file, 'w') as f:
+                f.write(str(i + 1))
+            print(f"💾 Checkpoint salvato a {i + 1} campioni ({len(geneexpemb)} embedding).")
+
+    # --- SALVATAGGIO FINALE ---
     geneexpemb = np.squeeze(np.array(geneexpemb))
-    print(geneexpemb.shape)
-    np.save(strname,geneexpemb)
+    np.save(strname, geneexpemb)
+    print(f"\n✅ Salvataggio finale completato: {strname}")
+
+    # --- PULIZIA ---
+    if os.path.exists(temp_save):
+        os.remove(temp_save)
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
 
     avg_time = total_inference_time / gexpr_feature.shape[0]
     print(f"\nTempo medio di inferenza per cellula: {avg_time:.4f} secondi")
     print(f"Tempo totale di inferenza: {total_inference_time:.2f} secondi")
-    
+ 
 
 if __name__=='__main__':
     main()

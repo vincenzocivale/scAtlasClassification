@@ -95,7 +95,7 @@ def convertconfig(ckpt):
     newconfig['config']['model_type']=model_type
     newconfig['model_state_dict']=d
     newconfig['config']['pos_embed']=False
-    newconfig['config']['device']='cuda'
+    newconfig['config']['device']='cuda:1'
     return newconfig
 
 def load_model(best_ckpt_path, device):
